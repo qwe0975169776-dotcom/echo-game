@@ -27,7 +27,7 @@ function makeSheet(name) {
       nr = nr || 1; nc = nc || 1;
       if (nr < 1 || nc < 1) throw new Error('範圍列數必須至少 1');
       const rng = {
-        getValues: () => { const out = []; for (let i = 0; i < nr; i++) { const row = []; for (let j = 0; j < nc; j++) { const v = (data[r - 1 + i] || [])[c - 1 + j]; row.push(v === undefined || v === null ? '' : v); } out.push(row); } return out; },
+        getValues: () => { if (sh._env) { sh._env._io.reads++; sh._env._io.cells += nr * nc; } const out = []; for (let i = 0; i < nr; i++) { const row = []; for (let j = 0; j < nc; j++) { const v = (data[r - 1 + i] || [])[c - 1 + j]; row.push(v === undefined || v === null ? '' : v); } out.push(row); } return out; },
         setValues: vals => {
           if (vals.length !== nr || vals.some(v => v.length !== nc)) throw new Error('setValues 大小不符 ' + nr + 'x' + nc);
           for (let i = 0; i < nr; i++) { data[r - 1 + i] = data[r - 1 + i] || []; for (let j = 0; j < nc; j++) data[r - 1 + i][c - 1 + j] = conv(vals[i][j]); }
@@ -48,14 +48,14 @@ function makeEnv(opts) {
   const spreadsheet = {
     getName: () => opts.sheetName || '傳聲筒成績',
     getSheetByName: n => sheets[n] || null,
-    insertSheet: n => (sheets[n] = makeSheet(n)),
+    insertSheet: n => { const sh = makeSheet(n); sh._env = env; return (sheets[n] = sh); },
     _sheets: sheets
   };
   const props = {};
   const cache = {};
   const logs = [];
   const env = {
-    _sheets: sheets, _props: props, _cache: cache, _logs: logs,
+    _sheets: sheets, _props: props, _cache: cache, _logs: logs, _io: { reads: 0, cells: 0 }, lockBusy: 0,
     github: { up: true, code: null, fetchCount: 0 },
     SpreadsheetApp: { openById: id => { if (!id) throw new Error('沒有試算表 ID'); return spreadsheet; } },
     PropertiesService: {
@@ -68,7 +68,8 @@ function makeEnv(opts) {
     CacheService: {
       getScriptCache: () => ({
         get: k => { const c = cache[k]; return c && c.exp > Date.now() ? c.v : null; },
-        put: (k, v, sec) => { if (Buffer.byteLength(v) > 100000) throw new Error('快取太大'); cache[k] = { v, exp: Date.now() + sec * 1000 }; }
+        put: (k, v, sec) => { if (Buffer.byteLength(v) > 100000) throw new Error('快取太大'); cache[k] = { v, exp: Date.now() + sec * 1000 }; },
+        remove: k => { delete cache[k]; }
       })
     },
     UrlFetchApp: {
@@ -78,7 +79,12 @@ function makeEnv(opts) {
         return { getResponseCode: () => 200, getContentText: () => env.github.code };
       }
     },
-    LockService: { getScriptLock: () => ({ waitLock: () => {}, releaseLock: () => {} }) },
+    // lockBusy = N：接下來 N 次要鎖都會「忙碌」
+    LockService: { getScriptLock: () => ({
+      waitLock: () => { if (env.lockBusy > 0) { env.lockBusy--; throw new Error('Lock timeout'); } },
+      tryLock: () => { if (env.lockBusy > 0) { env.lockBusy--; return false; } return true; },
+      releaseLock: () => {}
+    }) },
     ContentService: {
       MimeType: { JSON: 'application/json' },
       createTextOutput: t => ({ _t: t, setMimeType: function () { return this; }, getContent: function () { return this._t; } })
